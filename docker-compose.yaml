@@ -1,0 +1,81 @@
+# version: '3.8'
+
+# services:
+#   #Laravel backend
+#   backend:
+#     build: ./backend
+#     ports:
+#       - "8000:9000"
+#     depends_on:
+#       - postgres
+#     environment:
+#       DB_CONNECTION: pgsql
+#       DB_HOST: postgres
+#       DB_PORT: 5432
+#       DB_DATABASE: pos_db
+#       DB_USERNAME: postgres
+#       DB_PASSWORD: password
+#     volumes:
+#       - ./backend:/var/www
+#     command: >
+#       sh -c "php artisan migrate --force &&
+#              php artisan serve --host=0.0.0.0 --port=9000"
+
+#   # PostgreSQL Database
+#   postgres:
+#     image: postgres:15
+#     ports:
+#       - "5432:5432"
+#     environment:
+#       POSTGRES_DB: pos_db
+#       POSTGRES_USER: postgres
+#       POSTGRES_PASSWORD: password
+#     volumes:
+#       - postgres_data:/var/lib/postgresql/data
+#       - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # Optional
+
+# volumes:
+#   postgres_data:
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: pos_db
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
+      SESSION_DRIVER: file
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/var/www/html
+    command: >
+      sh -c "composer install --no-interaction --prefer-dist --no-progress &&
+             php artisan key:generate --force &&
+             php artisan migrate --force &&
+             php artisan serve --host=0.0.0.0 --port=8000"
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: pos_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
