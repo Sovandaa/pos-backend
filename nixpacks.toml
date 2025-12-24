@@ -1,0 +1,14 @@
+[phases.setup]
+nixPkgs = ["php84", "php84Packages.composer"]
+
+[phases.install]
+cmds = ["composer install --no-dev --optimize-autoloader"]
+
+[phases.build]
+cmds = [
+  "mkdir -p /tmp/storage/framework/{sessions,views,cache}",
+  "mkdir -p /tmp/bootstrap/cache"
+]
+
+[start]
+cmd = "php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=$PORT"
