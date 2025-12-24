@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Services\OrderService;
+use App\Enums\OrderStatus;
 
 class OrderController extends Controller
 {
@@ -38,11 +39,15 @@ class OrderController extends Controller
 
     public function update(Request $request, int $id)
     {
+        $allowed = implode(',', OrderStatus::values());
         $data = $request->validate([
-            'status' => ['required', 'string', 'in:pending,paid,completed,canceled'],
+            'status' => [
+                'required', 'string', "in:$allowed",
+            ],
         ]);
 
-        $order = $this->orders->updateOrderStatus($id, $data['status']);
+        $status = OrderStatus::from($data['status']);
+        $order = $this->orders->updateOrderStatus($id, $status);
         return response()->json($order);
     }
 

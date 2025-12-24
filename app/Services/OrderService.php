@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\Product;
+use App\Enums\OrderStatus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -68,7 +69,7 @@ class OrderService
                 'subtotal' => $subtotal,
                 'tax' => $tax,
                 'total' => $total,
-                'status' => 'pending',
+                'status' => OrderStatus::Pending,
             ]);
         });
 
@@ -81,11 +82,11 @@ class OrderService
         return $this->buildReceiptPayload($order);
     }
 
-    public function updateOrderStatus(int $id, string $status): Order
+    public function updateOrderStatus(int $id, OrderStatus $status): Order
     {
         $order = Order::findOrFail($id);
 
-        if ($status === 'canceled' && $order->status !== 'canceled') {
+        if ($status === OrderStatus::Canceled && $order->status !== OrderStatus::Canceled) {
             DB::transaction(fn() => $this->restoreStock($order));
         }
 
@@ -96,13 +97,13 @@ class OrderService
     public function cancelOrder(int $id): Order
     {
         $order = Order::findOrFail($id);
-        if ($order->status === 'canceled') {
+        if ($order->status === OrderStatus::Canceled) {
             abort(409, 'Order already canceled');
         }
 
         DB::transaction(function () use ($order) {
             $this->restoreStock($order);
-            $order->update(['status' => 'canceled']);
+            $order->update(['status' => OrderStatus::Canceled]);
         });
 
         return $order;
@@ -150,7 +151,7 @@ class OrderService
             "Receipt #{$order->order_number}",
             $order->customer_name ? "Customer: {$order->customer_name}" : null,
             $order->customer_email ? "Email: {$order->customer_email}" : null,
-            "Status: {$order->status}",
+            "Status: " . ($order->status instanceof OrderStatus ? $order->status->value : (string)$order->status),
             "Date: " . $order->created_at?->toDateTimeString(),
             str_repeat('-', 30),
         ];
