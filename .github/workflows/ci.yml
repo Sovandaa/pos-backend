@@ -57,5 +57,8 @@ jobs:
       - name: Run database migrations
         run: php artisan migrate --force --ansi
 
+      - name: Verify database connection
+        run: php artisan db:show --ansi
+
       - name: Run tests
         run: php artisan test --ansi
