@@ -12,4 +12,9 @@ WORKDIR /var/www/html
 COPY composer.json composer.lock* ./
 RUN composer install --no-interaction --prefer-dist --no-progress || true
 
+# Set permissions for Laravel storage and cache directories
+RUN mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache \
+    && mkdir -p bootstrap/cache \
+    && chmod -R 777 storage bootstrap/cache
+
 EXPOSE 8000
