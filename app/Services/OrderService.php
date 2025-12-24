@@ -17,54 +17,23 @@ class OrderService
 
     public function createOrder(array $payload): array
     {
-        $validated = $this->validateOrderPayload($payload);
+        $data = $this->validateOrderPayload($payload);
+        $grouped = $this->groupItems($data['items']);
 
-        $order = DB::transaction(function () use ($validated) {
-            $grouped = collect($validated['items'])
-                ->groupBy('product_id')
-                ->map(fn($g) => [
-                    'product_id' => $g[0]['product_id'],
-                    'quantity' => $g->sum('quantity'),
-                ]);
+        $order = DB::transaction(function () use ($data, $grouped) {
+            $products = $this->loadProductsWithLock(array_keys($grouped));
+            $this->ensureSufficientStock($products, $grouped);
 
-            $products = Product::whereIn('id', $grouped->keys())
-                ->lockForUpdate()
-                ->get()
-                ->keyBy('id');
+            [$lineItems, $subtotal] = $this->buildLineItemsAndSubtotal($products, $grouped);
+            $this->decrementStock($products, $grouped);
 
-            $lineItems = [];
-            $subtotal = 0.00;
-
-            foreach ($grouped as $item) {
-                $product = $products[$item['product_id']] ?? null;
-                if (!$product) {
-                    abort(422, "Product {$item['product_id']} not found");
-                }
-                if ($product->stock < $item['quantity']) {
-                    abort(422, "Insufficient stock for {$product->name}");
-                }
-
-                $product->decrement('stock', $item['quantity']);
-
-                $lineTotal = round((float)$product->price * (int)$item['quantity'], 2);
-                $lineItems[] = [
-                    'product_id' => $product->id,
-                    'name' => $product->name,
-                    'price' => (float)$product->price,
-                    'quantity' => (int)$item['quantity'],
-                    'line_total' => (float)$lineTotal,
-                ];
-                $subtotal = round($subtotal + $lineTotal, 2);
-            }
-
-            $tax = isset($validated['tax']) ? (float)$validated['tax'] : 0.00;
+            $tax = isset($data['tax']) ? (float) $data['tax'] : 0.0;
             $total = round($subtotal + $tax, 2);
-            $orderNumber = $this->generateOrderNumber();
 
             return Order::create([
-                'order_number' => $orderNumber,
-                'customer_name' => $validated['customer_name'] ?? null,
-                'customer_email' => $validated['customer_email'] ?? null,
+                'order_number' => $this->generateOrderNumber(),
+                'customer_name' => $data['customer_name'] ?? null,
+                'customer_email' => $data['customer_email'] ?? null,
                 'items' => $lineItems,
                 'subtotal' => $subtotal,
                 'tax' => $tax,
@@ -87,7 +56,7 @@ class OrderService
         $order = Order::findOrFail($id);
 
         if ($status === OrderStatus::Canceled && $order->status !== OrderStatus::Canceled) {
-            DB::transaction(fn() => $this->restoreStock($order));
+            DB::transaction(fn () => $this->restoreStock($order));
         }
 
         $order->update(['status' => $status]);
@@ -101,12 +70,8 @@ class OrderService
             abort(409, 'Order already canceled');
         }
 
-        DB::transaction(function () use ($order) {
-            $this->restoreStock($order);
-            $order->update(['status' => OrderStatus::Canceled]);
-        });
-
-        return $order;
+        // Reuse the same path as generic status update
+        return $this->updateOrderStatus($id, OrderStatus::Canceled);
     }
 
     public function getReceiptByOrderNumber(string $orderNumber): array
@@ -133,7 +98,7 @@ class OrderService
         foreach ($order->items as $item) {
             Product::where('id', $item['product_id'])
                 ->lockForUpdate()
-                ->increment('stock', (int)$item['quantity']);
+                ->increment('stock', (int) $item['quantity']);
         }
     }
 
@@ -147,34 +112,102 @@ class OrderService
 
     private function buildReceiptPayload(Order $order): array
     {
+        $status = $order->status instanceof OrderStatus ? $order->status->value : (string) $order->status;
+
         $lines = [
             "Receipt #{$order->order_number}",
             $order->customer_name ? "Customer: {$order->customer_name}" : null,
             $order->customer_email ? "Email: {$order->customer_email}" : null,
-            "Status: " . ($order->status instanceof OrderStatus ? $order->status->value : (string)$order->status),
+            "Status: {$status}",
             "Date: " . $order->created_at?->toDateTimeString(),
             str_repeat('-', 30),
         ];
         $lines = array_values(array_filter($lines));
 
         foreach ($order->items as $item) {
-            $lines[] = "{$item['name']} x{$item['quantity']} @ " . number_format($item['price'], 2) . " = " . number_format($item['line_total'], 2);
+            $lines[] = sprintf(
+                '%s x%d @ %s = %s',
+                $item['name'],
+                (int) $item['quantity'],
+                number_format((float) $item['price'], 2),
+                number_format((float) $item['line_total'], 2)
+            );
         }
 
         $lines[] = str_repeat('-', 30);
-        $lines[] = 'Subtotal: ' . number_format((float)$order->subtotal, 2);
-        $lines[] = 'Tax: ' . number_format((float)$order->tax, 2);
-        $lines[] = 'Total: ' . number_format((float)$order->total, 2);
+        $lines[] = 'Subtotal: ' . number_format((float) $order->subtotal, 2);
+        $lines[] = 'Tax: ' . number_format((float) $order->tax, 2);
+        $lines[] = 'Total: ' . number_format((float) $order->total, 2);
 
         return [
             'order' => $order,
             'receipt' => [
                 'text' => implode("\n", $lines),
                 'items' => $order->items,
-                'subtotal' => (float)$order->subtotal,
-                'tax' => (float)$order->tax,
-                'total' => (float)$order->total,
+                'subtotal' => (float) $order->subtotal,
+                'tax' => (float) $order->tax,
+                'total' => (float) $order->total,
             ],
         ];
+    }
+
+    private function groupItems(array $items): array
+    {
+        $grouped = [];
+        foreach ($items as $row) {
+            $pid = (int) $row['product_id'];
+            $qty = (int) $row['quantity'];
+            $grouped[$pid] = ($grouped[$pid] ?? 0) + $qty;
+        }
+        return $grouped; // [product_id => quantity]
+    }
+
+    private function loadProductsWithLock(array $ids)
+    {
+        return Product::whereIn('id', $ids)
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+    }
+
+    private function ensureSufficientStock($products, array $grouped): void
+    {
+        foreach ($grouped as $productId => $quantity) {
+            $product = $products[$productId] ?? null;
+            if (!$product) {
+                abort(422, "Product {$productId} not found");
+            }
+            if ((int) $product->stock < (int) $quantity) {
+                abort(422, "Insufficient stock for {$product->name}");
+            }
+        }
+    }
+
+    private function buildLineItemsAndSubtotal($products, array $grouped): array
+    {
+        $lineItems = [];
+        $subtotal = 0.0;
+
+        foreach ($grouped as $productId => $quantity) {
+            $product = $products[$productId];
+            $lineTotal = round((float) $product->price * (int) $quantity, 2);
+            $lineItems[] = [
+                'product_id' => $product->id,
+                'name' => $product->name,
+                'price' => (float) $product->price,
+                'quantity' => (int) $quantity,
+                'line_total' => (float) $lineTotal,
+            ];
+            $subtotal = round($subtotal + $lineTotal, 2);
+        }
+
+        return [$lineItems, $subtotal];
+    }
+
+    private function decrementStock($products, array $grouped): void
+    {
+        foreach ($grouped as $productId => $quantity) {
+            $products[$productId]->decrement('stock', (int) $quantity);
+        }
     }
 }
